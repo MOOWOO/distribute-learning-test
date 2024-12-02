@@ -1,79 +1,88 @@
+import os
 import torch
 import deepspeed
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# 모델 경로와 하이퍼파라미터
-MODEL_NAME = "meta-llama/Llama-3.1-8b"  # 사용할 LLaMA 3.1 모델
-BATCH_SIZE = 16
-SEQ_LEN = 512
+# Configuration
+MODEL_NAME = "EleutherAI/pythia-6.9b"
+SEQ_LEN = 256  # Reduced sequence length
+BATCH_SIZE_PER_GPU = 1
+GRADIENT_ACCUMULATION_STEPS = 1
 EPOCHS = 3
 LR = 3e-5
 
-def get_data_loader():
-    """
-    Wikitext-2-raw 데이터셋을 로드하고 토크나이징하는 함수.
-    """
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    
-    # 데이터 로드 및 토크나이징
+WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))  # Total number of GPUs across nodes
+TRAIN_BATCH_SIZE = BATCH_SIZE_PER_GPU * WORLD_SIZE * GRADIENT_ACCUMULATION_STEPS
+
+def get_dataloader(tokenizer):
+    """Prepare the DataLoader."""
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+
     def tokenize_function(examples):
         return tokenizer(examples["text"], truncation=True, padding="max_length", max_length=SEQ_LEN)
-    
+
     tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=["text"])
     tokenized_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
-    
-    return torch.utils.data.DataLoader(tokenized_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    return torch.utils.data.DataLoader(tokenized_dataset, batch_size=BATCH_SIZE_PER_GPU, shuffle=True)
 
 def train():
-    # DeepSpeed 초기화
-    deepspeed.init_distributed()
+    print(f"[INFO] Starting training on {WORLD_SIZE} GPUs")
 
-    # 모델 및 토크나이저 로드
+    # Load model and tokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+
+    # Add a pad token if missing
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+
     model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
 
-    # 모델을 DeepSpeed로 래핑
+    # Resize model embeddings to account for added special tokens
+    model.resize_token_embeddings(len(tokenizer))
+
+    # Initialize DeepSpeed
     model_engine, optimizer, _, _ = deepspeed.initialize(
         model=model,
         model_parameters=model.parameters(),
         config_params={
-            "train_batch_size": BATCH_SIZE,
+            "train_batch_size": TRAIN_BATCH_SIZE,
+            "micro_batch_size_per_gpu": BATCH_SIZE_PER_GPU,
+            "gradient_accumulation_steps": GRADIENT_ACCUMULATION_STEPS,
             "optimizer": {
                 "type": "AdamW",
-                "params": {
-                    "lr": LR,
-                    "betas": [0.9, 0.999],
-                    "eps": 1e-8
-                }
+                "params": {"lr": LR, "betas": [0.9, 0.999], "eps": 1e-8}
             },
-            "fp16": {
-                "enabled": True  # FP16 활성화
-            },
+            "fp16": {"enabled": True},
+            "zero_optimization": {
+                "stage": 3,
+                "offload_optimizer": {"device": "cpu", "pin_memory": True},
+                "offload_param": {"device": "cpu", "pin_memory": True}
+            }
         }
     )
 
-    # 데이터 로더 생성
-    train_loader = get_data_loader()
+    # Load DataLoader
+    dataloader = get_dataloader(tokenizer)
 
-    # 학습 루프
+    # Training loop
     for epoch in range(EPOCHS):
+        print(f"[INFO] Epoch {epoch + 1}/{EPOCHS}")
         model_engine.train()
-        for step, batch in enumerate(train_loader):
+        for step, batch in enumerate(dataloader):
             input_ids = batch["input_ids"].to(model_engine.local_rank)
             attention_mask = batch["attention_mask"].to(model_engine.local_rank)
 
-            # 모델 실행
             outputs = model_engine(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
             loss = outputs.loss
 
-            # 역전파 및 매개변수 업데이트
             model_engine.backward(loss)
             model_engine.step()
 
             if step % 10 == 0 and model_engine.local_rank == 0:
-                print(f"Epoch {epoch + 1}/{EPOCHS}, Step {step}, Loss: {loss.item()}")
+                print(f"[LOG] Epoch {epoch + 1}, Step {step}, Loss: {loss.item()}")
+
+    print("[INFO] Training completed.")
 
 if __name__ == "__main__":
     train()
