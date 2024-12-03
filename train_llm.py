@@ -67,7 +67,7 @@ def train():
 
     # Load DataLoader
     dataloader = get_dataloader(tokenizer)
-
+    print("step = " + enumerate(dataloader) + "/batch")
     # Training loop
     for epoch in range(EPOCHS):
         print(f"[INFO] Epoch {epoch + 1}/{EPOCHS}")
