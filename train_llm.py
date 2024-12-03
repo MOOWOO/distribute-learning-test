@@ -17,6 +17,9 @@ TRAIN_BATCH_SIZE = BATCH_SIZE_PER_GPU * WORLD_SIZE * GRADIENT_ACCUMULATION_STEPS
 
 def get_dataloader(tokenizer):
     """Prepare the DataLoader."""
+    # Training Loss 7.4112
+    # Epoch 3.0
+    # Step 1692
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
 
     def tokenize_function(examples):
