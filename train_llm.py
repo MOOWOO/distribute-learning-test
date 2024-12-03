@@ -5,7 +5,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
 
 # Configuration
-MODEL_NAME = "EleutherAI/pythia-6.9b"
+MODEL_NAME = "EleutherAI/pythia-1b"
 SEQ_LEN = 256  # Reduced sequence length
 BATCH_SIZE_PER_GPU = 1
 GRADIENT_ACCUMULATION_STEPS = 1
@@ -67,7 +67,7 @@ def train():
 
     # Load DataLoader
     dataloader = get_dataloader(tokenizer)
-    print("step = " + enumerate(dataloader) + "/batch")
+  
     # Training loop
     for epoch in range(EPOCHS):
         print(f"[INFO] Epoch {epoch + 1}/{EPOCHS}")
